@@ -26,7 +26,7 @@ from render_pipeline import (
     merge_video_and_audio,
     sanitize_filename,
 )
-from voice_synth import generate_complete_audio
+from voice_synth import concatenate_audio_fragments, generate_complete_audio
 
 MAX_REPL_ITERATIONS = int(os.getenv("MAX_REPL_ITERATIONS", "3"))
 MAX_FIX_CALLS_PER_JOB = int(os.getenv("MAX_FIX_CALLS_PER_JOB", "12"))
@@ -45,6 +45,7 @@ class PipelineState(TypedDict):
 
     scene_index: int  # 1-based; index of the scene currently being worked on
     generated_videos: list[str]
+    succeeded_scene_indices: list[int]  # parallel to generated_videos; which scenes actually made it in
     current_code: Optional[str]
     current_class_name: Optional[str]
     current_error: Optional[str]
@@ -73,6 +74,7 @@ def create_initial_state(job_id: str, topic: str, language_name: str, target_dur
         audio_durations={},
         scene_index=1,
         generated_videos=[],
+        succeeded_scene_indices=[],
         current_code=None,
         current_class_name=None,
         current_error=None,
@@ -209,6 +211,7 @@ def node_scene_compile(state: PipelineState) -> dict:
         next_index = scene_index + 1
         return {
             "generated_videos": state["generated_videos"] + [video_path],
+            "succeeded_scene_indices": state["succeeded_scene_indices"] + [scene_index],
             "previous_context": {
                 "text": scene_data.get("text", ""),
                 "animation": scene_data.get("animation", ""),
@@ -265,8 +268,24 @@ def node_assemble(state: PipelineState) -> dict:
 
     final_path = str(media_dir / f"output_{state['job_id']}.mp4")
 
-    if state["audio_path"] and os.path.exists(state["audio_path"]):
-        if not merge_video_and_audio(silent_path, state["audio_path"], final_path):
+    # Rebuild the audio track from only the scenes that actually made it into generated_videos.
+    # Using the original full audio_path (every scene's narration) here would desync video and
+    # audio the moment any scene gets skipped -- the video would be shorter than the narration.
+    job_media_dir = media_dir / state["job_id"]
+    surviving_fragments = [
+        str(job_media_dir / "audio_fragments" / f"fragment_{i}.wav")
+        for i in state["succeeded_scene_indices"]
+        if (job_media_dir / "audio_fragments" / f"fragment_{i}.wav").exists()
+    ]
+
+    synced_audio_path = None
+    if surviving_fragments:
+        synced_audio_path = str(job_media_dir / "audio_synced.wav")
+        if not concatenate_audio_fragments(surviving_fragments, synced_audio_path):
+            synced_audio_path = None
+
+    if synced_audio_path and os.path.exists(synced_audio_path):
+        if not merge_video_and_audio(silent_path, synced_audio_path, final_path):
             final_path = silent_path
     else:
         os.rename(silent_path, final_path)

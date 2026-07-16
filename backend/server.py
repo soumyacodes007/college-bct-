@@ -10,6 +10,7 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -103,6 +104,43 @@ async def get_job(job_id: str):
         "error": values.get("error"),
         "video_url": video_url,
     }
+
+
+@app.get("/api/videos")
+async def list_videos():
+    """Lists previously generated videos, newest first.
+
+    Source of truth is the media directory itself (not a separate index) -- a file glob can't go
+    stale the way a hand-maintained list could. Topic/language are best-effort enrichment pulled
+    from the checkpointer for each job_id; a video still shows up even if that lookup fails.
+    """
+    graph = app.state.graph
+    videos = []
+
+    files = [f for f in MEDIA_DIR.glob("output_*.mp4") if not f.name.startswith("output_silent_")]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    for f in files:
+        job_id = f.stem[len("output_"):]
+        topic, language = None, None
+
+        try:
+            snapshot = await graph.aget_state({"configurable": {"thread_id": job_id}})
+            if snapshot and snapshot.values:
+                topic = snapshot.values.get("topic")
+                language = snapshot.values.get("language_name")
+        except Exception:
+            pass
+
+        videos.append({
+            "job_id": job_id,
+            "topic": topic,
+            "language": language,
+            "video_url": f"/api/media/{f.name}",
+            "created_at": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+        })
+
+    return {"videos": videos}
 
 
 @app.get("/api/media/{filename}")

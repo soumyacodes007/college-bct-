@@ -8,10 +8,16 @@ LLM picks a sane default (it won't -- Manim's default font has no Bengali/Devana
 
 import json
 import re
+import time
 
 from openai import OpenAI
 
 from llm_client import call_llm
+
+# call_llm only retries on transport failures or a fully-empty response; a whitespace-only or
+# garbage (non-JSON) response passes that check and only fails later at parse time here, so this
+# retry wraps the whole generate-then-parse cycle instead of relying on call_llm's retry alone.
+MAX_PARSE_RETRIES = 3
 
 _FONT_RULES_TEMPLATE = """
 FONT REQUIREMENT (CRITICAL):
@@ -124,13 +130,22 @@ CURRENT CONTENT:
         "Python code without errors. NEVER use self.camera.frame in Scene. Always respond in valid JSON format."
     )
 
-    try:
-        response_text = call_llm(client, system, prompt)
-    except Exception as e:
-        print(f"[code_synth] Scene {index} generation failed: {e}")
-        return None
+    for attempt in range(MAX_PARSE_RETRIES):
+        try:
+            response_text = call_llm(client, system, prompt)
+        except Exception as e:
+            print(f"[code_synth] Scene {index} generation failed (attempt {attempt + 1}/{MAX_PARSE_RETRIES}): {e}")
+            response_text = None
 
-    return _parse_code_response(response_text, index)
+        result = _parse_code_response(response_text, index) if response_text else None
+        if result:
+            return result
+
+        if attempt < MAX_PARSE_RETRIES - 1:
+            print(f"[code_synth] Scene {index}: retrying generation ({attempt + 2}/{MAX_PARSE_RETRIES})")
+            time.sleep(2 ** attempt)
+
+    return None
 
 
 def fix_manim_code(client: OpenAI, original_code: str, error_message: str, class_name: str, font: str | None) -> dict | None:
@@ -170,16 +185,23 @@ Respond ONLY with valid JSON."""
         "errors. Always respond in valid JSON format."
     )
 
-    try:
-        response_text = call_llm(client, system, fix_prompt)
-    except Exception as e:
-        print(f"[code_synth] Fix for {class_name} failed: {e}")
-        return None
+    for attempt in range(MAX_PARSE_RETRIES):
+        try:
+            response_text = call_llm(client, system, fix_prompt)
+        except Exception as e:
+            print(f"[code_synth] Fix for {class_name} failed (attempt {attempt + 1}/{MAX_PARSE_RETRIES}): {e}")
+            response_text = None
 
-    result = _parse_code_response(response_text, class_name)
-    if result:
-        print(f"[code_synth] Fix applied: {result.get('fix_explanation', 'no explanation')}")
-    return result
+        result = _parse_code_response(response_text, class_name) if response_text else None
+        if result:
+            print(f"[code_synth] Fix applied: {result.get('fix_explanation', 'no explanation')}")
+            return result
+
+        if attempt < MAX_PARSE_RETRIES - 1:
+            print(f"[code_synth] Fix for {class_name}: retrying ({attempt + 2}/{MAX_PARSE_RETRIES})")
+            time.sleep(2 ** attempt)
+
+    return None
 
 
 def _parse_code_response(response_text: str, label) -> dict | None:
